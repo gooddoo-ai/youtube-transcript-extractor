@@ -4,6 +4,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { TranscriptResponse, ErrorResponse } from "@/types";
 
+// Edge Runtime 사용 — CDN 엣지에서 실행되어 데이터센터 IP 차단 우회
+export const runtime = "edge";
+
 const ANDROID_VERSION = "20.10.38";
 const ANDROID_UA = `com.google.android.youtube/${ANDROID_VERSION} (Linux; U; Android 14)`;
 
