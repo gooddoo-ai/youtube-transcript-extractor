@@ -37,11 +37,16 @@ export async function POST(request: NextRequest) {
 
     const videoId = extractVideoId(url)!;
 
-    // 최대 3회 재시도
+    // 여러 언어 옵션으로 시도 (Vercel 해외 서버에서 지역 제한 우회)
+    const langOptions = [undefined, "ko", "en"];
     let lastError = "";
-    for (let attempt = 0; attempt < 3; attempt++) {
+
+    for (const lang of langOptions) {
       try {
-        const segments = await YoutubeTranscript.fetchTranscript(videoId);
+        const segments = await YoutubeTranscript.fetchTranscript(
+          videoId,
+          lang ? { lang } : undefined
+        );
         if (segments && segments.length > 0) {
           const text = segments.map((s) => s.text).join(" ");
           return NextResponse.json<TranscriptResponse>({
@@ -56,10 +61,7 @@ export async function POST(request: NextRequest) {
         if (lastError.includes("captcha") || lastError.includes("too many")) {
           break;
         }
-        // 그 외에는 잠깐 대기 후 재시도
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
-        }
+        // 다음 언어 옵션으로 시도
       }
     }
 
