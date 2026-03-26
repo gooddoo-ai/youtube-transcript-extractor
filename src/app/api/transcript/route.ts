@@ -130,11 +130,13 @@ export async function POST(request: NextRequest) {
       playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
 
     if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
+      // 디버그: 왜 자막이 없는지 확인
+      const status = playerData?.playabilityStatus?.status;
       return NextResponse.json<ErrorResponse>(
         {
           error: {
             code: "NO_TRANSCRIPT",
-            message: "이 영상에는 자막이 없습니다",
+            message: `이 영상에는 자막이 없습니다 (status: ${status}, hasCaptions: ${!!playerData?.captions})`,
           },
         },
         { status: 404 }
