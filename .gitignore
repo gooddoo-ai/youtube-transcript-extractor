@@ -1,0 +1,7 @@
+node_modules/
+.next/
+.env.local
+.npm-cache/
+*.tsbuildinfo
+next-env.d.ts
+.bkit/
