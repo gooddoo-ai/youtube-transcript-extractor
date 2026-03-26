@@ -1,111 +1,95 @@
-// Design Ref: §4 — API Route (프록시: 브라우저에서 받은 자막 URL로 XML 가져오기)
-// YouTube가 Vercel IP를 차단하므로 InnerTube 호출은 클라이언트에서 수행
+// Design Ref: §4 — API Route (자막 추출)
+// 서버에서 youtube-transcript 라이브러리로 자막 추출
 
 import { NextRequest, NextResponse } from "next/server";
-import type { ErrorResponse } from "@/types";
+import { YoutubeTranscript } from "youtube-transcript";
+import type { TranscriptResponse, ErrorResponse } from "@/types";
 
-function decodeEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&apos;/g, "'")
-    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) =>
-      String.fromCodePoint(parseInt(hex, 16))
-    )
-    .replace(/&#(\d+);/g, (_, dec: string) =>
-      String.fromCodePoint(parseInt(dec, 10))
-    )
-    .replace(/\n/g, " ");
+function extractVideoId(url: string): string | null {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=)([a-zA-Z0-9_-]{11})/,
+    /(?:youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+    /(?:youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/,
+  ];
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
 }
 
-// 클라이언트가 보낸 captionUrl에서 자막 XML을 가져와 텍스트 파싱
+function isValidYoutubeUrl(url: string): boolean {
+  return extractVideoId(url) !== null;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { captionUrl, videoId } = body;
+    const { url } = body;
 
-    if (!captionUrl || !videoId) {
+    if (!url || !isValidYoutubeUrl(url)) {
       return NextResponse.json<ErrorResponse>(
-        { error: { code: "INVALID_REQUEST", message: "captionUrl과 videoId가 필요합니다" } },
+        { error: { code: "INVALID_URL", message: "유효하지 않은 유튜브 URL입니다" } },
         { status: 400 }
       );
     }
 
-    // 안전 검증: YouTube 도메인만 허용
-    try {
-      const url = new URL(captionUrl);
-      if (!url.hostname.endsWith(".youtube.com")) {
-        return NextResponse.json<ErrorResponse>(
-          { error: { code: "INVALID_URL", message: "유효하지 않은 자막 URL입니다" } },
-          { status: 400 }
-        );
-      }
-    } catch {
-      return NextResponse.json<ErrorResponse>(
-        { error: { code: "INVALID_URL", message: "유효하지 않은 URL 형식입니다" } },
-        { status: 400 }
-      );
-    }
+    const videoId = extractVideoId(url)!;
 
-    const captionResponse = await fetch(captionUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/537.36",
-      },
-    });
-
-    if (!captionResponse.ok) {
-      return NextResponse.json<ErrorResponse>(
-        { error: { code: "FETCH_FAILED", message: "자막 데이터를 가져올 수 없습니다" } },
-        { status: 500 }
-      );
-    }
-
-    const xml = await captionResponse.text();
-
-    // 새 형식 파싱 (<p t="..." d="..."><s>...</s></p>)
-    const segments: string[] = [];
-    const newRegex = /<p\s+t="\d+"\s+d="\d+"[^>]*>([\s\S]*?)<\/p>/g;
-    let match;
-    while ((match = newRegex.exec(xml)) !== null) {
-      const inner = match[1];
-      const sTexts: string[] = [];
-      const sRegex = /<s[^>]*>([^<]*)<\/s>/g;
-      let sMatch;
-      while ((sMatch = sRegex.exec(inner)) !== null) {
-        sTexts.push(sMatch[1]);
-      }
-      const text = sTexts.length > 0 ? sTexts.join("") : inner.replace(/<[^>]+>/g, "");
-      if (text.trim()) segments.push(decodeEntities(text.trim()));
-    }
-
-    // 구 형식 폴백 (<text start="..." dur="...">...</text>)
-    if (segments.length === 0) {
-      const oldRegex = /<text[^>]*>(.*?)<\/text>/g;
-      while ((match = oldRegex.exec(xml)) !== null) {
-        const decoded = decodeEntities(match[1]);
-        if (decoded.trim()) segments.push(decoded.trim());
+    // 최대 3회 재시도
+    let lastError = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const segments = await YoutubeTranscript.fetchTranscript(videoId);
+        if (segments && segments.length > 0) {
+          const text = segments.map((s) => s.text).join(" ");
+          return NextResponse.json<TranscriptResponse>({
+            videoId,
+            text,
+            language: segments[0].lang || "auto",
+          });
+        }
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        // captcha/rate limit 에러면 재시도 의미 없음
+        if (lastError.includes("captcha") || lastError.includes("too many")) {
+          break;
+        }
+        // 그 외에는 잠깐 대기 후 재시도
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
       }
     }
 
-    if (segments.length === 0) {
+    // 모든 시도 실패
+    if (lastError.includes("disabled") || lastError.includes("Transcript is disabled")) {
       return NextResponse.json<ErrorResponse>(
-        { error: { code: "PARSE_FAILED", message: "자막 텍스트를 파싱할 수 없습니다" } },
-        { status: 500 }
+        { error: { code: "NO_TRANSCRIPT", message: "이 영상의 자막이 비활성화되어 있습니다" } },
+        { status: 404 }
+      );
+    }
+    if (lastError.includes("No transcripts") || lastError.includes("not available")) {
+      return NextResponse.json<ErrorResponse>(
+        { error: { code: "NO_TRANSCRIPT", message: "이 영상에는 자막이 없습니다" } },
+        { status: 404 }
+      );
+    }
+    if (lastError.includes("captcha") || lastError.includes("too many")) {
+      return NextResponse.json<ErrorResponse>(
+        { error: { code: "RATE_LIMITED", message: "YouTube 요청이 제한되었습니다. 잠시 후 다시 시도해주세요" } },
+        { status: 429 }
       );
     }
 
-    return NextResponse.json({
-      videoId,
-      text: segments.join(" "),
-      language: "auto",
-    });
+    return NextResponse.json<ErrorResponse>(
+      { error: { code: "EXTRACT_FAILED", message: "자막 추출 실패: " + lastError } },
+      { status: 500 }
+    );
   } catch {
     return NextResponse.json<ErrorResponse>(
-      { error: { code: "INTERNAL_ERROR", message: "서버 오류가 발생했습니다" } },
+      { error: { code: "INTERNAL_ERROR", message: "서버 오류가 발생했습니다. 잠시 후 다시 시도해주세요" } },
       { status: 500 }
     );
   }
